@@ -2342,7 +2342,23 @@
             margin-top: 1rem;
         }
 
+        .limit-row {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 8px;
+            align-items: center;
+        }
 
+        .limit-row select,
+        .limit-row input {
+            flex: 1;
+        }
+
+        .add-row {
+            background: none;
+            border: none;
+            cursor: pointer;
+        }
 
 
         /* Стили для переводов */
@@ -8705,13 +8721,20 @@
             categories: '++id, name, parentId, type',
             transactions: '++id, type, accountId, toAccountId, categoryId, amount, date, comment',
             monthlyPlans: '++id, month, plannedIncome',
-            limits: '++id, categoryId, limitType, limitValue, order'
+            limits: '++id, month, categoryId, limitType, limitValue, order'
         }).upgrade(tx => {
-            // Устанавливаем начальный порядок для существующих лимитов
+            const currentMonth = new Date().toISOString().slice(0, 7);
+
             return tx.limits.toCollection().modify((limit, idx) => {
-                limit.order = idx; // Порядок по умолчанию
+                limit.order = idx;
+
+                // если месяц отсутствует (старые данные)
+                if (!limit.month) {
+                    limit.month = currentMonth;
+                }
             });
         });
+
         // Даем глобальный доступ для отладки
         window.db = db;
 
@@ -9646,33 +9669,41 @@
                         <i class="fas fa-plus"></i> Добавить лимит
                     </button>
                 </div>
-                
+                ....................................................
                 <!-- Форма добавления лимита -->
                 <div class="add-limit-form" id="add-limit-form" style="display: none;">
                     <h5>Добавить лимит для категории</h5>
-                    <form id="new-limit-form">
-                        <div class="form-group">
-                            <label>Категория:</label>
-                            <select id="limit-category" class="form-control">
-                                <option value="">Выберите категорию</option>
-                            </select>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label>Лимит (% от дохода):</label>
-                            <input type="number" id="limit-percentage" class="form-control" 
-                                   min="0" max="100" step="1" placeholder="20">
-                        </div>
-                        
-                        <div class="form-buttons">
-                            <button type="submit" class="btn btn-primary">
-                                <i class="fas fa-plus"></i> Добавить
-                            </button>
-                            <button type="button" class="btn btn-secondary" id="cancel-limit-btn">
-                                <i class="fas fa-times"></i> Отмена
-                            </button>
-                        </div>
-                    </form>
+                        <form id="new-limit-form">
+
+                            <div id="limit-rows">
+                                <!-- Одна строка лимита -->
+                                <div class="limit-row">
+                                    <select class="form-control limit-category">
+                                        <option value="">Выберите категорию</option>
+                                    </select>
+
+                                    <input type="number"
+                                        class="form-control limit-percentage"
+                                        min="1" max="100"
+                                        placeholder="%">
+
+                                    <button type="button" class="btn btn-icon add-row">
+                                        <i class="fas fa-plus"></i>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="form-buttons">
+                                <button type="submit" class="btn btn-primary">
+                                    <i class="fas fa-save"></i> Сохранить все
+                                </button>
+                                <button type="button" class="btn btn-secondary" id="cancel-limit-btn">
+                                    Отмена
+                                </button>
+                            </div>
+
+                        </form>
+
                 </div>
                 
                 <!-- Список лимитов -->
@@ -9745,7 +9776,12 @@
                         }
 
                         // Получаем текущие лимиты
-                        const limits = await db.limits.toArray();
+                        const currentMonth = new Date().toISOString().slice(0, 7);
+                        const limits = await db.limits
+                            .where('month')
+                            .equals(currentMonth)
+                            .sortBy('order');
+
                         const currentLimit = limits.find(l => l.id === limitId);
                         const currentTotal = limits.reduce((sum, l) => sum + l.limitValue, 0);
                         const newTotal = currentTotal - currentLimit.limitValue + newValue;
@@ -9773,6 +9809,20 @@
                             this.value = currentLimit.limitValue;
                         }
                     });
+                });
+
+
+                document.getElementById('limit-rows').addEventListener('click', async (e) => {
+                    if (!e.target.closest('.add-row')) return;
+
+                    const row = e.target.closest('.limit-row');
+                    const clone = row.cloneNode(true);
+
+                    clone.querySelector('.limit-category').value = '';
+                    clone.querySelector('.limit-percentage').value = '';
+
+                    row.after(clone);
+                    await populateLimitCategorySelect();
                 });
 
                 document.querySelectorAll('.delete-limit').forEach(btn => {
@@ -9893,97 +9943,55 @@
 
         // Заполняем выпадающий список категорий для лимитов
         async function populateLimitCategorySelect() {
-            const select = document.getElementById('limit-category');
-
-            // Получаем все категории расходов
-            const expenseCategories = await db.categories.where('type').equals('expense').toArray();
-            const limits = await db.limits
-                .orderBy('order') // Сортируем по порядку
+            const categories = await db.categories
+                .where('type').equals('expense')
                 .toArray();
 
-            // Фильтруем категории, для которых уже есть лимиты
-            const categoriesWithLimits = limits.map(l => l.categoryId);
-            const availableCategories = expenseCategories.filter(c => !categoriesWithLimits.includes(c.id));
+            document.querySelectorAll('.limit-category').forEach(select => {
+                select.innerHTML = '<option value="">Выберите категорию</option>';
 
-            if (availableCategories.length === 0) {
-                select.innerHTML = '<option value="">Нет доступных категорий</option>';
-                return;
-            }
-
-            // Создаем опции с группировкой по родительским категориям
-            const mainCategories = availableCategories.filter(c => c.parentId === 0);
-            let optionsHTML = '<option value="">Выберите категорию</option>';
-
-            for (const mainCat of mainCategories) {
-                // Основная категория
-                optionsHTML += `<option value="${mainCat.id}">${mainCat.name}</option>`;
-
-                // Подкатегории
-                const subcategories = availableCategories.filter(c => c.parentId === mainCat.id);
-                for (const subCat of subcategories) {
-                    optionsHTML += `<option value="${subCat.id}">&nbsp;&nbsp;↳ ${subCat.name}</option>`;
-                }
-            }
-
-            select.innerHTML = optionsHTML;
+                categories.forEach(cat => {
+                    select.innerHTML += `<option value="${cat.id}">${cat.name}</option>`;
+                });
+            });
         }
+
 
         // Обработчик добавления лимита 
         async function handleAddLimit(e) {
             e.preventDefault();
 
-            const categoryId = parseInt(document.getElementById('limit-category').value);
-            const limitValue = parseInt(document.getElementById('limit-percentage').value);
+            const rows = document.querySelectorAll('.limit-row');
+            const limits = await db.limits.toArray();
 
-            if (!categoryId || !limitValue) {
-                alert('Заполните все поля!');
-                return;
-            }
+            let currentTotal = limits.reduce((s, l) => s + l.limitValue, 0);
 
-            if (limitValue <= 0 || limitValue > 100) {
-                alert('Лимит должен быть от 1 до 100%');
-                return;
-            }
+            for (const row of rows) {
+                const categoryId = parseInt(row.querySelector('.limit-category').value);
+                const percent = parseInt(row.querySelector('.limit-percentage').value);
 
-            try {
-                // Получаем текущие лимиты
-                const limits = await db.limits.toArray();
+                if (!categoryId || !percent) continue;
 
-                // Считаем сумму текущих процентов
-                const currentTotalPercent = limits.reduce((sum, limit) => sum + limit.limitValue, 0);
-                const newTotalPercent = currentTotalPercent + limitValue;
+                currentTotal += percent;
 
-                // Проверяем превышение
-                if (newTotalPercent > 100) {
-                    const availablePercent = 100 - currentTotalPercent;
-                    const message = 'Общая сумма лимитов превысит 100%\n\n' +
-                        'Текущие лимиты: ' + currentTotalPercent + '%\n' +
-                        'Добавляемый лимит: ' + limitValue + '%\n' +
-                        'Будет: ' + newTotalPercent + '% (превышение на ' + (newTotalPercent - 100) + '%)\n\n' +
-                        'Свободно для распределения: ' + availablePercent + '%\n\n' +
-                        'Хотите продолжить?';
-
-                    if (!confirm(message)) {
-                        return;
-                    }
+                if (currentTotal > 100) {
+                    alert('Общая сумма лимитов превышает 100%');
+                    return;
                 }
 
                 await db.limits.add({
-                    categoryId: categoryId,
+                    categoryId,
                     limitType: 'percentage',
-                    limitValue: limitValue,
-                    order: limits.length // Новый лимит в конец
+                    limitValue: percent,
+                    order: limits.length
                 });
-
-                alert('Лимит добавлен!');
-                document.getElementById('add-limit-form').style.display = 'none';
-                e.target.reset();
-                await loadLimitsPage();
-
-            } catch (error) {
-                alert('Ошибка: ' + error.message);
             }
+
+            alert('Лимиты добавлены!');
+            document.getElementById('add-limit-form').style.display = 'none';
+            await loadLimitsPage();
         }
+
 
         // Инициализация перетаскивания для лимитов
         function initDragAndDrop() {
